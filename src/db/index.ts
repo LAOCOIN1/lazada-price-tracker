@@ -1,5 +1,5 @@
-import { drizzle as drizzleSqlite, BetterSQLite3Database } from 'drizzle-orm/better-sqlite3';
-import Database from 'better-sqlite3';
+import { drizzle as drizzleLibsql } from 'drizzle-orm/libsql';
+import { createClient } from '@libsql/client';
 
 import { drizzle as drizzlePg, NodePgDatabase } from 'drizzle-orm/node-postgres';
 import pg from 'pg';
@@ -108,11 +108,13 @@ export async function initDb(): Promise<void> {
     console.log('[DB] MySQL initialized successfully.');
 
   } else {
-    // Default: SQLite (suitable for local use and Android Termux)
-    const sqliteClient = new Database(DATABASE_URL);
+    // Default: SQLite via @libsql/client (pure WASM — works on Android/Termux, no native compile needed)
+    // URL format: "file:lazada_tracker.db" for local file, or leave as-is if user already set full path
+    const libsqlUrl = DATABASE_URL.startsWith('file:') ? DATABASE_URL : `file:${DATABASE_URL}`;
+    const sqliteClient = createClient({ url: libsqlUrl });
     rawSqliteClient = sqliteClient;
 
-    sqliteClient.exec(`
+    await sqliteClient.execute(`
       CREATE TABLE IF NOT EXISTS products (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         url TEXT NOT NULL,
@@ -124,21 +126,25 @@ export async function initDb(): Promise<void> {
         last_checked TEXT NOT NULL,
         status TEXT NOT NULL,
         created_at TEXT NOT NULL
-      );
+      )
+    `);
+    await sqliteClient.execute(`
       CREATE TABLE IF NOT EXISTS price_history (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         product_id INTEGER NOT NULL,
         price REAL NOT NULL,
         timestamp TEXT NOT NULL
-      );
+      )
+    `);
+    await sqliteClient.execute(`
       CREATE TABLE IF NOT EXISTS settings (
         key TEXT PRIMARY KEY,
         value TEXT NOT NULL
-      );
+      )
     `);
 
-    dbSqlite = drizzleSqlite(sqliteClient);
-    console.log(`[DB] SQLite initialized successfully. Database file: ${DATABASE_URL}`);
+    dbSqlite = drizzleLibsql(sqliteClient);
+    console.log(`[DB] SQLite (libsql) initialized successfully. File: ${libsqlUrl}`);
   }
 
   // Graceful shutdown: close all open DB connections before the process exits.
