@@ -1,0 +1,6 @@
+{
+  "name": "Lazada Price Tracker",
+  "description": "A high-performance Lazada price tracker with multi-database Drizzle support, standalone background workers, Telegram bot alerts, and an elegant React dashboard.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
