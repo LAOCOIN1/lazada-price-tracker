@@ -1,4 +1,7 @@
-import { drizzle as drizzleNodeSqlite } from 'drizzle-orm/node-sqlite';
+// SQLite  → raw node:sqlite (DatabaseSync, built-in Node 22+, no npm install)
+// Postgres → drizzle-orm/node-postgres
+// MySQL   → drizzle-orm/mysql2
+
 import { DatabaseSync } from 'node:sqlite';
 
 import { drizzle as drizzlePg, NodePgDatabase } from 'drizzle-orm/node-postgres';
@@ -12,62 +15,58 @@ import * as schema from './schema.js';
 import { DBProduct, DBPriceHistory, DBSettings } from './schema.js';
 
 const DATABASE_TYPE = process.env.DATABASE_TYPE || 'sqlite';
-const DATABASE_URL = process.env.DATABASE_URL || 'lazada_tracker.db';
+const DATABASE_URL  = process.env.DATABASE_URL  || 'lazada_tracker.db';
 
-let dbSqlite: any = null;
-let dbPg: any = null;
+let dbSqliteRaw: DatabaseSync | null = null;
+let dbPg:   any = null;
 let dbMysql: any = null;
 
-let rawSqliteClient: any = null;
-let rawPgClient: any = null;
+let rawPgClient:    any = null;
 let rawMysqlClient: any = null;
 
-// Initialize Database connection and auto-create tables
+// ─── Row mappers (snake_case DB → camelCase TS) ───────────────────────────────
+function rowToProduct(r: any): DBProduct {
+  return {
+    id:           r.id,
+    url:          r.url,
+    title:        r.title,
+    imageUrl:     r.image_url,
+    initialPrice: r.initial_price,
+    currentPrice: r.current_price,
+    targetPrice:  r.target_price ?? null,
+    lastChecked:  r.last_checked,
+    status:       r.status,
+    createdAt:    r.created_at,
+  };
+}
+function rowToHistory(r: any): DBPriceHistory {
+  return { id: r.id, productId: r.product_id, price: r.price, timestamp: r.timestamp };
+}
+
+// ─── Init ─────────────────────────────────────────────────────────────────────
 export async function initDb(): Promise<void> {
-  console.log(`[DB] Initializing database of type: ${DATABASE_TYPE}`);
+  console.log(`[DB] Initializing database: ${DATABASE_TYPE}`);
 
   if (DATABASE_TYPE === 'postgres' || DATABASE_TYPE === 'postgresql') {
-    // Use Pool (not Client) to safely serve concurrent API requests
     const { Pool } = pg;
-    const client = new Pool({
-      connectionString: DATABASE_URL,
-    });
+    const client = new Pool({ connectionString: DATABASE_URL });
     rawPgClient = client;
 
-    // Create tables via Raw SQL (Idempotent and highly compatible)
     await client.query(`
       CREATE TABLE IF NOT EXISTS products (
-        id SERIAL PRIMARY KEY,
-        url TEXT NOT NULL,
-        title TEXT NOT NULL,
-        image_url TEXT NOT NULL,
-        initial_price DOUBLE PRECISION NOT NULL,
-        current_price DOUBLE PRECISION NOT NULL,
-        target_price DOUBLE PRECISION,
-        last_checked TEXT NOT NULL,
-        status TEXT NOT NULL,
-        created_at TEXT NOT NULL
+        id SERIAL PRIMARY KEY, url TEXT NOT NULL, title TEXT NOT NULL,
+        image_url TEXT NOT NULL, initial_price DOUBLE PRECISION NOT NULL,
+        current_price DOUBLE PRECISION NOT NULL, target_price DOUBLE PRECISION,
+        last_checked TEXT NOT NULL, status TEXT NOT NULL, created_at TEXT NOT NULL
       );
-    `);
-
-    await client.query(`
       CREATE TABLE IF NOT EXISTS price_history (
-        id SERIAL PRIMARY KEY,
-        product_id INTEGER NOT NULL,
-        price DOUBLE PRECISION NOT NULL,
-        timestamp TEXT NOT NULL
+        id SERIAL PRIMARY KEY, product_id INTEGER NOT NULL,
+        price DOUBLE PRECISION NOT NULL, timestamp TEXT NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
     `);
-
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS settings (
-        key TEXT PRIMARY KEY,
-        value TEXT NOT NULL
-      );
-    `);
-
     dbPg = drizzlePg(client);
-    console.log('[DB] PostgreSQL initialized successfully.');
+    console.log('[DB] PostgreSQL ready.');
 
   } else if (DATABASE_TYPE === 'mysql') {
     const connection = await mysql.createConnection(DATABASE_URL);
@@ -75,303 +74,221 @@ export async function initDb(): Promise<void> {
 
     await connection.query(`
       CREATE TABLE IF NOT EXISTS products (
-        id INT AUTO_INCREMENT PRIMARY KEY,
-        url VARCHAR(2048) NOT NULL,
-        title VARCHAR(1024) NOT NULL,
-        image_url VARCHAR(2048) NOT NULL,
-        initial_price DOUBLE NOT NULL,
-        current_price DOUBLE NOT NULL,
-        target_price DOUBLE,
-        last_checked VARCHAR(64) NOT NULL,
-        status VARCHAR(64) NOT NULL,
-        created_at VARCHAR(64) NOT NULL
+        id INT AUTO_INCREMENT PRIMARY KEY, url VARCHAR(2048) NOT NULL,
+        title VARCHAR(1024) NOT NULL, image_url VARCHAR(2048) NOT NULL,
+        initial_price DOUBLE NOT NULL, current_price DOUBLE NOT NULL,
+        target_price DOUBLE, last_checked VARCHAR(64) NOT NULL,
+        status VARCHAR(64) NOT NULL, created_at VARCHAR(64) NOT NULL
       );
     `);
-
     await connection.query(`
       CREATE TABLE IF NOT EXISTS price_history (
-        id INT AUTO_INCREMENT PRIMARY KEY,
-        product_id INT NOT NULL,
-        price DOUBLE NOT NULL,
-        timestamp VARCHAR(64) NOT NULL
+        id INT AUTO_INCREMENT PRIMARY KEY, product_id INT NOT NULL,
+        price DOUBLE NOT NULL, timestamp VARCHAR(64) NOT NULL
       );
     `);
-
     await connection.query(`
       CREATE TABLE IF NOT EXISTS settings (
-        \`key\` VARCHAR(255) PRIMARY KEY,
-        \`value\` TEXT NOT NULL
+        \`key\` VARCHAR(255) PRIMARY KEY, \`value\` TEXT NOT NULL
       );
     `);
-
     dbMysql = drizzleMysql(connection);
-    console.log('[DB] MySQL initialized successfully.');
+    console.log('[DB] MySQL ready.');
 
   } else {
-    // Default: SQLite via node:sqlite — built into Node.js 22+, zero npm install, works on Android/Termux
-    const sqliteClient = new DatabaseSync(DATABASE_URL);
-    rawSqliteClient = sqliteClient;
+    // ── SQLite via node:sqlite (built-in Node 22+, zero native deps) ──────────
+    const client = new DatabaseSync(DATABASE_URL);
+    dbSqliteRaw = client;
 
-    sqliteClient.exec(`
+    client.exec(`
       CREATE TABLE IF NOT EXISTS products (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        url TEXT NOT NULL,
-        title TEXT NOT NULL,
-        image_url TEXT NOT NULL,
-        initial_price REAL NOT NULL,
-        current_price REAL NOT NULL,
-        target_price REAL,
-        last_checked TEXT NOT NULL,
-        status TEXT NOT NULL,
-        created_at TEXT NOT NULL
-      )
-    `);
-    sqliteClient.exec(`
+        url TEXT NOT NULL, title TEXT NOT NULL, image_url TEXT NOT NULL,
+        initial_price REAL NOT NULL, current_price REAL NOT NULL,
+        target_price REAL, last_checked TEXT NOT NULL,
+        status TEXT NOT NULL, created_at TEXT NOT NULL
+      );
       CREATE TABLE IF NOT EXISTS price_history (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        product_id INTEGER NOT NULL,
-        price REAL NOT NULL,
-        timestamp TEXT NOT NULL
-      )
+        product_id INTEGER NOT NULL, price REAL NOT NULL, timestamp TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
     `);
-    sqliteClient.exec(`
-      CREATE TABLE IF NOT EXISTS settings (
-        key TEXT PRIMARY KEY,
-        value TEXT NOT NULL
-      )
-    `);
-
-    dbSqlite = drizzleNodeSqlite(sqliteClient);
-    console.log(`[DB] SQLite (node:sqlite built-in) initialized. File: ${DATABASE_URL}`);
+    console.log(`[DB] SQLite (node:sqlite built-in) ready. File: ${DATABASE_URL}`);
   }
 
-  // Graceful shutdown: close all open DB connections before the process exits.
-  // Prevents "connection leaked" warnings from Postgres/MySQL servers.
+  // Graceful shutdown
   const shutdown = async () => {
-    console.log('[DB] Closing database connections...');
-    if (rawPgClient) { try { await rawPgClient.end(); } catch (_) {} }
+    console.log('[DB] Closing connections...');
+    if (rawPgClient)    { try { await rawPgClient.end();    } catch (_) {} }
     if (rawMysqlClient) { try { await rawMysqlClient.end(); } catch (_) {} }
-    if (rawSqliteClient) { try { rawSqliteClient.close(); } catch (_) {} }
-    console.log('[DB] All connections closed.');
+    if (dbSqliteRaw)    { try { dbSqliteRaw.close();        } catch (_) {} }
     process.exit(0);
   };
-  process.once('SIGINT', shutdown);
+  process.once('SIGINT',  shutdown);
   process.once('SIGTERM', shutdown);
 }
 
-// Ensure connection is initialized
-function getDbInstance() {
-  if (DATABASE_TYPE === 'postgres' || DATABASE_TYPE === 'postgresql') {
-    if (!dbPg) throw new Error('[DB] Postgres is not initialized. Call initDb() first.');
-    return { db: dbPg, type: 'postgres' };
-  } else if (DATABASE_TYPE === 'mysql') {
-    if (!dbMysql) throw new Error('[DB] MySQL is not initialized. Call initDb() first.');
-    return { db: dbMysql, type: 'mysql' };
-  } else {
-    if (!dbSqlite) throw new Error('[DB] SQLite is not initialized. Call initDb() first.');
-    return { db: dbSqlite, type: 'sqlite' };
-  }
+// ─── Type helper ─────────────────────────────────────────────────────────────
+function getType() {
+  if (DATABASE_TYPE === 'postgres' || DATABASE_TYPE === 'postgresql') return 'postgres';
+  if (DATABASE_TYPE === 'mysql') return 'mysql';
+  return 'sqlite';
 }
 
-// Repository Operations
-
+// ─── Repository ───────────────────────────────────────────────────────────────
 export async function getProducts(): Promise<DBProduct[]> {
-  const { db, type } = getDbInstance();
-  if (type === 'postgres') {
-    return await db.select().from(schema.pgProducts);
-  } else if (type === 'mysql') {
-    return await db.select().from(schema.mysqlProducts);
-  } else {
-    return await db.select().from(schema.sqliteProducts);
-  }
+  const type = getType();
+  if (type === 'postgres') return (await dbPg.select().from(schema.pgProducts)) as DBProduct[];
+  if (type === 'mysql')    return (await dbMysql.select().from(schema.mysqlProducts)) as DBProduct[];
+  if (!dbSqliteRaw) throw new Error('[DB] SQLite not initialized');
+  return (dbSqliteRaw.prepare('SELECT * FROM products').all() as any[]).map(rowToProduct);
 }
 
 export async function addProduct(product: {
-  url: string;
-  title: string;
-  imageUrl: string;
-  initialPrice: number;
-  currentPrice: number;
-  targetPrice?: number | null;
+  url: string; title: string; imageUrl: string;
+  initialPrice: number; currentPrice: number; targetPrice?: number | null;
 }): Promise<DBProduct> {
-  const { db, type } = getDbInstance();
-  const timestamp = new Date().toISOString();
-  
-  const insertData = {
-    url: product.url,
-    title: product.title,
-    imageUrl: product.imageUrl,
-    initialPrice: product.initialPrice,
-    currentPrice: product.initialPrice,
-    targetPrice: product.targetPrice || null,
-    lastChecked: timestamp,
-    status: 'active',
-    createdAt: timestamp,
+  const type = getType();
+  const ts   = new Date().toISOString();
+  const data = {
+    url: product.url, title: product.title, imageUrl: product.imageUrl,
+    initialPrice: product.initialPrice, currentPrice: product.initialPrice,
+    targetPrice: product.targetPrice ?? null,
+    lastChecked: ts, status: 'active', createdAt: ts,
   };
 
   if (type === 'postgres') {
-    const result = await db.insert(schema.pgProducts).values(insertData).returning();
-    const newProduct = result[0];
-    await addPriceHistory(newProduct.id, product.initialPrice, timestamp);
-    return newProduct;
-  } else if (type === 'mysql') {
-    const result = await db.insert(schema.mysqlProducts).values(insertData);
-    const insertId = result[0].insertId;
-    await addPriceHistory(insertId, product.initialPrice, timestamp);
-    const products = await db.select().from(schema.mysqlProducts).where(eq(schema.mysqlProducts.id, insertId));
-    return products[0];
-  } else {
-    const result = await db.insert(schema.sqliteProducts).values(insertData).returning();
-    const newProduct = result[0];
-    await addPriceHistory(newProduct.id, product.initialPrice, timestamp);
-    return newProduct;
+    const [r] = await dbPg.insert(schema.pgProducts).values(data).returning();
+    await addPriceHistory(r.id, product.initialPrice, ts);
+    return r;
   }
+  if (type === 'mysql') {
+    const [result] = await dbMysql.insert(schema.mysqlProducts).values(data);
+    const id = result.insertId;
+    await addPriceHistory(id, product.initialPrice, ts);
+    const [r] = await dbMysql.select().from(schema.mysqlProducts).where(eq(schema.mysqlProducts.id, id));
+    return r;
+  }
+  // SQLite
+  if (!dbSqliteRaw) throw new Error('[DB] SQLite not initialized');
+  const stmt = dbSqliteRaw.prepare(`
+    INSERT INTO products (url, title, image_url, initial_price, current_price, target_price, last_checked, status, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `);
+  const info = stmt.run(
+    data.url, data.title, data.imageUrl,
+    data.initialPrice, data.currentPrice, data.targetPrice,
+    data.lastChecked, data.status, data.createdAt
+  ) as any;
+  const newId = Number(info.lastInsertRowid);
+  await addPriceHistory(newId, product.initialPrice, ts);
+  const row = dbSqliteRaw.prepare('SELECT * FROM products WHERE id = ?').get(newId);
+  return rowToProduct(row);
 }
 
 export async function deleteProduct(id: number): Promise<void> {
-  const { db, type } = getDbInstance();
+  const type = getType();
   if (type === 'postgres') {
-    await db.delete(schema.pgPriceHistory).where(eq(schema.pgPriceHistory.productId, id));
-    await db.delete(schema.pgProducts).where(eq(schema.pgProducts.id, id));
-  } else if (type === 'mysql') {
-    await db.delete(schema.mysqlPriceHistory).where(eq(schema.mysqlPriceHistory.productId, id));
-    await db.delete(schema.mysqlProducts).where(eq(schema.mysqlProducts.id, id));
-  } else {
-    await db.delete(schema.sqlitePriceHistory).where(eq(schema.sqlitePriceHistory.productId, id));
-    await db.delete(schema.sqliteProducts).where(eq(schema.sqliteProducts.id, id));
+    await dbPg.delete(schema.pgPriceHistory).where(eq(schema.pgPriceHistory.productId, id));
+    await dbPg.delete(schema.pgProducts).where(eq(schema.pgProducts.id, id));
+    return;
   }
+  if (type === 'mysql') {
+    await dbMysql.delete(schema.mysqlPriceHistory).where(eq(schema.mysqlPriceHistory.productId, id));
+    await dbMysql.delete(schema.mysqlProducts).where(eq(schema.mysqlProducts.id, id));
+    return;
+  }
+  if (!dbSqliteRaw) throw new Error('[DB] SQLite not initialized');
+  dbSqliteRaw.prepare('DELETE FROM price_history WHERE product_id = ?').run(id);
+  dbSqliteRaw.prepare('DELETE FROM products WHERE id = ?').run(id);
 }
 
 export async function addPriceHistory(productId: number, price: number, timestamp: string): Promise<void> {
-  const { db, type } = getDbInstance();
+  const type = getType();
   const data = { productId, price, timestamp };
-
-  if (type === 'postgres') {
-    await db.insert(schema.pgPriceHistory).values(data);
-  } else if (type === 'mysql') {
-    await db.insert(schema.mysqlPriceHistory).values(data);
-  } else {
-    await db.insert(schema.sqlitePriceHistory).values(data);
-  }
+  if (type === 'postgres') { await dbPg.insert(schema.pgPriceHistory).values(data); return; }
+  if (type === 'mysql')    { await dbMysql.insert(schema.mysqlPriceHistory).values(data); return; }
+  if (!dbSqliteRaw) throw new Error('[DB] SQLite not initialized');
+  dbSqliteRaw.prepare('INSERT INTO price_history (product_id, price, timestamp) VALUES (?, ?, ?)').run(productId, price, timestamp);
 }
 
 export async function getPriceHistory(productId: number): Promise<DBPriceHistory[]> {
-  const { db, type } = getDbInstance();
-  if (type === 'postgres') {
-    return await db.select().from(schema.pgPriceHistory).where(eq(schema.pgPriceHistory.productId, productId));
-  } else if (type === 'mysql') {
-    return await db.select().from(schema.mysqlPriceHistory).where(eq(schema.mysqlPriceHistory.productId, productId));
-  } else {
-    return await db.select().from(schema.sqlitePriceHistory).where(eq(schema.sqlitePriceHistory.productId, productId));
-  }
+  const type = getType();
+  if (type === 'postgres') return await dbPg.select().from(schema.pgPriceHistory).where(eq(schema.pgPriceHistory.productId, productId));
+  if (type === 'mysql')    return await dbMysql.select().from(schema.mysqlPriceHistory).where(eq(schema.mysqlPriceHistory.productId, productId));
+  if (!dbSqliteRaw) throw new Error('[DB] SQLite not initialized');
+  return (dbSqliteRaw.prepare('SELECT * FROM price_history WHERE product_id = ?').all(productId) as any[]).map(rowToHistory);
 }
 
 export async function updateProductPrice(
-  id: number,
-  newPrice: number,
-  status: string,
-  lastChecked: string
+  id: number, newPrice: number, status: string, lastChecked: string
 ): Promise<{ priceDropped: boolean; dropAmount: number; currentPrice: number; prevPrice: number }> {
-  const { db, type } = getDbInstance();
-  
-  let currentProduct: DBProduct | undefined;
+  const type = getType();
+
+  let prevPrice: number;
   if (type === 'postgres') {
-    const result = await db.select().from(schema.pgProducts).where(eq(schema.pgProducts.id, id));
-    currentProduct = result[0];
+    const [r] = await dbPg.select().from(schema.pgProducts).where(eq(schema.pgProducts.id, id));
+    if (!r) throw new Error(`Product ${id} not found`);
+    prevPrice = r.currentPrice;
+    await dbPg.update(schema.pgProducts).set({ currentPrice: newPrice, status, lastChecked }).where(eq(schema.pgProducts.id, id));
   } else if (type === 'mysql') {
-    const result = await db.select().from(schema.mysqlProducts).where(eq(schema.mysqlProducts.id, id));
-    currentProduct = result[0];
+    const [r] = await dbMysql.select().from(schema.mysqlProducts).where(eq(schema.mysqlProducts.id, id));
+    if (!r) throw new Error(`Product ${id} not found`);
+    prevPrice = r.currentPrice;
+    await dbMysql.update(schema.mysqlProducts).set({ currentPrice: newPrice, status, lastChecked }).where(eq(schema.mysqlProducts.id, id));
   } else {
-    const result = await db.select().from(schema.sqliteProducts).where(eq(schema.sqliteProducts.id, id));
-    currentProduct = result[0];
+    if (!dbSqliteRaw) throw new Error('[DB] SQLite not initialized');
+    const r = dbSqliteRaw.prepare('SELECT * FROM products WHERE id = ?').get(id) as any;
+    if (!r) throw new Error(`Product ${id} not found`);
+    prevPrice = r.current_price;
+    dbSqliteRaw.prepare('UPDATE products SET current_price = ?, status = ?, last_checked = ? WHERE id = ?').run(newPrice, status, lastChecked, id);
   }
 
-  if (!currentProduct) {
-    throw new Error(`Product with ID ${id} not found`);
-  }
-
-  const prevPrice = currentProduct.currentPrice;
   const priceDropped = newPrice < prevPrice;
-  const dropAmount = prevPrice - newPrice;
-
-  const updateData = {
-    currentPrice: newPrice,
-    status,
-    lastChecked,
-  };
-
-  if (type === 'postgres') {
-    await db.update(schema.pgProducts).set(updateData).where(eq(schema.pgProducts.id, id));
-  } else if (type === 'mysql') {
-    await db.update(schema.mysqlProducts).set(updateData).where(eq(schema.mysqlProducts.id, id));
-  } else {
-    await db.update(schema.sqliteProducts).set(updateData).where(eq(schema.sqliteProducts.id, id));
-  }
-
-  // Only record history if price actually changed to avoid database bloat
-  if (newPrice !== prevPrice) {
-    await addPriceHistory(id, newPrice, lastChecked);
-  }
-
-  return {
-    priceDropped,
-    dropAmount: priceDropped ? dropAmount : 0,
-    currentPrice: newPrice,
-    prevPrice,
-  };
+  const dropAmount   = priceDropped ? prevPrice - newPrice : 0;
+  if (newPrice !== prevPrice) await addPriceHistory(id, newPrice, lastChecked);
+  return { priceDropped, dropAmount, currentPrice: newPrice, prevPrice };
 }
 
 export async function updateProductTargetPrice(id: number, targetPrice: number | null): Promise<void> {
-  const { db, type } = getDbInstance();
-  const updateData = { targetPrice };
-
-  if (type === 'postgres') {
-    await db.update(schema.pgProducts).set(updateData).where(eq(schema.pgProducts.id, id));
-  } else if (type === 'mysql') {
-    await db.update(schema.mysqlProducts).set(updateData).where(eq(schema.mysqlProducts.id, id));
-  } else {
-    await db.update(schema.sqliteProducts).set(updateData).where(eq(schema.sqliteProducts.id, id));
-  }
+  const type = getType();
+  if (type === 'postgres') { await dbPg.update(schema.pgProducts).set({ targetPrice }).where(eq(schema.pgProducts.id, id)); return; }
+  if (type === 'mysql')    { await dbMysql.update(schema.mysqlProducts).set({ targetPrice }).where(eq(schema.mysqlProducts.id, id)); return; }
+  if (!dbSqliteRaw) throw new Error('[DB] SQLite not initialized');
+  dbSqliteRaw.prepare('UPDATE products SET target_price = ? WHERE id = ?').run(targetPrice, id);
 }
 
-// Telegram and Global Settings
-
 export async function getTelegramSettings(): Promise<{ token?: string; chatId?: string }> {
-  const { db, type } = getDbInstance();
-  let settings: DBSettings[] = [];
-
-  if (type === 'postgres') {
-    settings = await db.select().from(schema.pgSettings);
-  } else if (type === 'mysql') {
-    settings = await db.select().from(schema.mysqlSettings);
-  } else {
-    settings = await db.select().from(schema.sqliteSettings);
+  const type = getType();
+  let rows: DBSettings[] = [];
+  if (type === 'postgres') rows = await dbPg.select().from(schema.pgSettings);
+  else if (type === 'mysql') rows = await dbMysql.select().from(schema.mysqlSettings);
+  else {
+    if (!dbSqliteRaw) throw new Error('[DB] SQLite not initialized');
+    rows = dbSqliteRaw.prepare("SELECT * FROM settings WHERE key IN ('telegram_token','telegram_chat_id')").all() as DBSettings[];
   }
-
-  const token = settings.find(s => s.key === 'telegram_token')?.value;
-  const chatId = settings.find(s => s.key === 'telegram_chat_id')?.value;
-
-  return { token, chatId };
+  return {
+    token:  rows.find(s => s.key === 'telegram_token')?.value,
+    chatId: rows.find(s => s.key === 'telegram_chat_id')?.value,
+  };
 }
 
 export async function saveTelegramSettings(token: string, chatId: string): Promise<void> {
-  const { db, type } = getDbInstance();
-
-  const tokenData = { key: 'telegram_token', value: token };
-  const chatIdData = { key: 'telegram_chat_id', value: chatId };
-
+  const type = getType();
   if (type === 'postgres') {
-    await db.insert(schema.pgSettings).values(tokenData).onConflictDoUpdate({ target: schema.pgSettings.key, set: { value: token } });
-    await db.insert(schema.pgSettings).values(chatIdData).onConflictDoUpdate({ target: schema.pgSettings.key, set: { value: chatId } });
-  } else if (type === 'mysql') {
-    // MySQL uses ON DUPLICATE KEY UPDATE in raw, or standard insert if not exist followed by update, or upsert.
-    // Drizzle doesn't have uniform cross-DB upsert syntax, so we can do delete + insert or handle separately.
-    await db.delete(schema.mysqlSettings).where(eq(schema.mysqlSettings.key, 'telegram_token'));
-    await db.insert(schema.mysqlSettings).values(tokenData);
-    await db.delete(schema.mysqlSettings).where(eq(schema.mysqlSettings.key, 'telegram_chat_id'));
-    await db.insert(schema.mysqlSettings).values(chatIdData);
-  } else {
-    await db.insert(schema.sqliteSettings).values(tokenData).onConflictDoUpdate({ target: schema.sqliteSettings.key, set: { value: token } });
-    await db.insert(schema.sqliteSettings).values(chatIdData).onConflictDoUpdate({ target: schema.sqliteSettings.key, set: { value: chatId } });
+    await dbPg.insert(schema.pgSettings).values({ key: 'telegram_token', value: token }).onConflictDoUpdate({ target: schema.pgSettings.key, set: { value: token } });
+    await dbPg.insert(schema.pgSettings).values({ key: 'telegram_chat_id', value: chatId }).onConflictDoUpdate({ target: schema.pgSettings.key, set: { value: chatId } });
+    return;
   }
+  if (type === 'mysql') {
+    await dbMysql.delete(schema.mysqlSettings).where(eq(schema.mysqlSettings.key, 'telegram_token'));
+    await dbMysql.insert(schema.mysqlSettings).values({ key: 'telegram_token', value: token });
+    await dbMysql.delete(schema.mysqlSettings).where(eq(schema.mysqlSettings.key, 'telegram_chat_id'));
+    await dbMysql.insert(schema.mysqlSettings).values({ key: 'telegram_chat_id', value: chatId });
+    return;
+  }
+  if (!dbSqliteRaw) throw new Error('[DB] SQLite not initialized');
+  dbSqliteRaw.prepare("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run('telegram_token', token);
+  dbSqliteRaw.prepare("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run('telegram_chat_id', chatId);
 }
