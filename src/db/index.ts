@@ -1,5 +1,5 @@
-import { drizzle as drizzleLibsql } from 'drizzle-orm/libsql';
-import { createClient } from '@libsql/client';
+import { drizzle as drizzleNodeSqlite } from 'drizzle-orm/node-sqlite';
+import { DatabaseSync } from 'node:sqlite';
 
 import { drizzle as drizzlePg, NodePgDatabase } from 'drizzle-orm/node-postgres';
 import pg from 'pg';
@@ -108,13 +108,11 @@ export async function initDb(): Promise<void> {
     console.log('[DB] MySQL initialized successfully.');
 
   } else {
-    // Default: SQLite via @libsql/client (pure WASM — works on Android/Termux, no native compile needed)
-    // URL format: "file:lazada_tracker.db" for local file, or leave as-is if user already set full path
-    const libsqlUrl = DATABASE_URL.startsWith('file:') ? DATABASE_URL : `file:${DATABASE_URL}`;
-    const sqliteClient = createClient({ url: libsqlUrl });
+    // Default: SQLite via node:sqlite — built into Node.js 22+, zero npm install, works on Android/Termux
+    const sqliteClient = new DatabaseSync(DATABASE_URL);
     rawSqliteClient = sqliteClient;
 
-    await sqliteClient.execute(`
+    sqliteClient.exec(`
       CREATE TABLE IF NOT EXISTS products (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         url TEXT NOT NULL,
@@ -128,7 +126,7 @@ export async function initDb(): Promise<void> {
         created_at TEXT NOT NULL
       )
     `);
-    await sqliteClient.execute(`
+    sqliteClient.exec(`
       CREATE TABLE IF NOT EXISTS price_history (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         product_id INTEGER NOT NULL,
@@ -136,15 +134,15 @@ export async function initDb(): Promise<void> {
         timestamp TEXT NOT NULL
       )
     `);
-    await sqliteClient.execute(`
+    sqliteClient.exec(`
       CREATE TABLE IF NOT EXISTS settings (
         key TEXT PRIMARY KEY,
         value TEXT NOT NULL
       )
     `);
 
-    dbSqlite = drizzleLibsql(sqliteClient);
-    console.log(`[DB] SQLite (libsql) initialized successfully. File: ${libsqlUrl}`);
+    dbSqlite = drizzleNodeSqlite(sqliteClient);
+    console.log(`[DB] SQLite (node:sqlite built-in) initialized. File: ${DATABASE_URL}`);
   }
 
   // Graceful shutdown: close all open DB connections before the process exits.
