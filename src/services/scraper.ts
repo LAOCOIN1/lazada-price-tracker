@@ -17,8 +17,39 @@ interface ScraperResult {
   methodUsed: string;
 }
 
-// Extract price, title, image using cheerio and regex patterns
-function parseHtmlLocally(html: string): Omit<ScraperResult, 'success' | 'methodUsed'> {
+// ─── Lazada Price Normalizer ─────────────────────────────────────────────────
+// Lazada stores prices internally as integers in satang (1/100 of Baht).
+// e.g. ฿349.00 is stored as 34900 in their JSON bundles.
+// Gemini sometimes picks up these raw JSON values instead of the displayed price.
+// We cross-reference with the URL's priceCompare parameter to detect and fix this.
+
+function extractUrlReferencePrice(url: string): number | null {
+  try {
+    const decoded = decodeURIComponent(url);
+    // priceCompare contains key:value pairs separated by ; e.g. displayPrice:34900
+    const m = decoded.match(/displayPrice[;:,](\d+)/) || decoded.match(/originPrice[;:,](\d+)/);
+    if (!m) return null;
+    return parseInt(m[1], 10) / 100; // satang → Baht
+  } catch { return null; }
+}
+
+function normalizeLazadaPrice(price: number, referencePrice: number | null): number {
+  if (price <= 0) return price;
+  // Primary check: if scraped price is exactly 100x the URL reference price, it's in satang
+  if (referencePrice && Math.abs(price - referencePrice * 100) < 1) {
+    console.log(`[Scraper] Price satang fix: ${price} satang → ฿${referencePrice} (URL reference)`);
+    return referencePrice;
+  }
+  // Heuristic: integer > 10000 divisible by 100, and ÷100 gives a plausible Lazada price (฿1–฿200,000)
+  if (Number.isInteger(price) && price > 10000 && price % 100 === 0) {
+    const normalized = price / 100;
+    if (normalized >= 1 && normalized <= 200000) {
+      console.log(`[Scraper] Price satang fix (heuristic): ${price} → ฿${normalized}`);
+      return normalized;
+    }
+  }
+  return price;
+}
   const $ = cheerio.load(html);
 
   let title = '';
@@ -116,12 +147,16 @@ async function parseHtmlWithGemini(html: string): Promise<Omit<ScraperResult, 'm
   });
 
   const prompt = `
-    You are a Lazada web page data extractor.
-    Extract the product title, current price, and primary image URL from the raw Lazada HTML snippet.
-    - Title must be the actual human product name.
-    - Price must be a pure number (e.g. 1250, 450.50). Do not include Baht or ฿.
-    - Image URL must be the product main photo.
-    
+    You are a Lazada Thailand product data extractor.
+    Extract the product title, current DISPLAYED price in Thai Baht, and primary image URL.
+
+    CRITICAL PRICE RULE:
+    - Return the price exactly as displayed to customers on the page (e.g. ฿349 → return 349).
+    - Lazada's HTML contains internal JSON with prices stored as integers 100× higher (satang units).
+      For example: the page shows ฿349 but JSON contains "price":34900 or "originPrice":34900.
+    - You MUST return the human-readable display price (349), NOT the raw JSON integer (34900).
+    - Price must be a plain number with no currency symbol.
+
     Raw HTML Snippet:
     ${cleanHtml}
   `;
@@ -236,6 +271,7 @@ export async function scrapeLazadaProduct(url: string, manualHtml?: string): Pro
   }
 
   // Scenario 2: Active HTTP Scrape
+  const refPrice = extractUrlReferencePrice(url);
   const userAgent = USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)];
   const headers = {
     'User-Agent': userAgent,
@@ -256,20 +292,15 @@ export async function scrapeLazadaProduct(url: string, manualHtml?: string): Pro
 
     // Try Local Parse first
     const localResult = parseHtmlLocally(html);
+    localResult.price = normalizeLazadaPrice(localResult.price, refPrice);
     if (localResult.price > 0 && localResult.title) {
-      return {
-        ...localResult,
-        success: true,
-        methodUsed: 'http_local'
-      };
+      return { ...localResult, success: true, methodUsed: 'http_local' };
     }
 
     // Try Gemini Parser Fallback if local parse fails (Lazada dynamic JS / anti-bot block)
     const geminiResult = await parseHtmlWithGemini(html);
-    return {
-      ...geminiResult,
-      methodUsed: 'http_gemini'
-    };
+    geminiResult.price = normalizeLazadaPrice(geminiResult.price, refPrice);
+    return { ...geminiResult, methodUsed: 'http_gemini' };
 
   } catch (error: any) {
     console.warn(`[Scraper] Active scrape failed: ${error.message}. Returning failure status or trying demo backup.`);
