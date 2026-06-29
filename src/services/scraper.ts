@@ -130,7 +130,7 @@ async function parseHtmlWithGemini(html: string): Promise<Omit<ScraperResult, 'm
   for (let attempt = 1; attempt <= 3; attempt++) {
     try {
       const response = await ai.models.generateContent({
-        model: "gemini-2.0-flash",
+        model: "gemini-3.1-flash-lite",
         contents: prompt,
         config: {
           responseMimeType: "application/json",
